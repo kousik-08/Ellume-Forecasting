@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.env
+.pytest_cache/
+
+# Data files that are generated
+*.csv
+*.json
+*.pkl
+*.h5
+*.hdf5
+
+# Virtual environments
+.venv/
+env/
+ENV/
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Reports and outputs
+experiment_report.json
+oof_diagnostics.csv
+worst_fold_diagnostics.csv
+worst_fold_hourly_summary.csv
+worst_fold_monthly_summary.csv
+predictions.csv
+
+# Walkthrough video
+Walkthrough.mp4

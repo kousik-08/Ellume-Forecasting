@@ -1,0 +1,152 @@
+LLume Forecast — Technical Approach and Code Guide
+=================================================
+
+PURPOSE
+-------
+Predict hourly AC power output (kW) for a 10,000 kW solar PV plant in Tumakuru,
+Karnataka, for the unlabeled July-August 2025 test period. Only day-ahead weather
+forecasts and timestamps are available at inference time. The solution therefore
+avoids using plant status or measured sensor values as model inputs.
+
+1. SOLUTION FLOW
+----------------
+Raw train.csv + test.csv
+        |
+        v
+parse_timestamps() -> robust timestamp parsing
+        |
+        v
+prepare_data() -> sentinel/missing handling, target checks, duplicate aggregation
+        |
+        v
+add_features() -> cyclic time features + approximate solar-position features
+        |
+        v
+TimeSeriesSplit (5 chronological folds)
+        |
+        +--> HistGradientBoosting pipeline
+        +--> Random Forest pipeline
+        +--> equal-weight ensemble predictions
+        +--> month/hour median baseline
+        |
+        v
+fold metrics + out-of-fold diagnostics
+        |
+        v
+fit ensemble on all cleaned training data
+        |
+        v
+predictions.csv + experiment_report.json + diagnostic CSV files
+        |
+        v
+app.py -> Streamlit dashboard for interactive metrics and plots
+
+2. DATA PREPARATION AND QUALITY
+-------------------------------
+- Timestamp parsing handles ISO-style and day-first timestamp strings separately,
+  then sorts rows chronologically.
+- Training records with missing target values or the -999 target sentinel are removed.
+- The -999 sentinel in forecast inputs is converted to missing and imputed inside each
+  model pipeline. The imputer is fit only on the corresponding training fold.
+- Repeated timestamps are consolidated using median weather features and median target.
+- Negative target readings are clipped to zero; values above the documented plant AC
+  capacity are clipped to 10,000 kW.
+
+Important label assumption: 230 records have status RUN, measured POA irradiance above
+200 W/m², and reported target values from 0.1 to 20 in the kW target column. Their
+magnitudes appear consistent with MW values accidentally stored as kW, so the pipeline
+multiplies these values by 1,000 before clipping. This is a heuristic inference, not a
+verified source quality flag. A sensitivity run without this correction produced mean
+fold MAE around 412.77 kW, versus 271.09 kW with the correction. This materially changes
+the score and must be confirmed with the data owner before relying on the result.
+
+Plant status and measured POA are used only in the historical label-quality rule. They
+are not predictors, because equivalent fields are unavailable in the test data.
+
+3. FEATURE ENGINEERING
+----------------------
+The four weather inputs are forecast cloud cover, temperature, wind speed, and humidity.
+Additional features include:
+- hour-of-day sine/cosine pairs;
+- day-of-year sine/cosine pairs;
+- month sine/cosine pairs;
+- approximate solar elevation derived from timestamp and plant coordinates;
+- a clear-sky proxy combining solar elevation and forecast cloud cover;
+- solar-elevation interactions with cloud cover, temperature, and humidity.
+
+Solar-position features are approximations, not measured irradiance. The feature set is
+restricted to values available for both historical training and future test rows.
+
+4. MODELS AND BASELINE
+----------------------
+Two tree-based models are trained in scikit-learn pipelines with median imputation:
+- HistGradientBoostingRegressor
+- RandomForestRegressor
+
+The final model is an equal-weight VotingRegressor that averages their predictions.
+A month/hour median baseline provides a transparent reference. It falls back to hour
+median and then global median when a month/hour lookup is unavailable.
+
+5. VALIDATION DESIGN AND RESULTS
+--------------------------------
+Validation uses TimeSeriesSplit with five chronological folds. All candidate models and
+the baseline use the same fold boundaries. The model is chosen using out-of-fold metrics,
+not the training-fit score.
+
+Latest recorded results:
+- Ensemble mean fold MAE: 271.09 kW.
+- Ensemble fold MAE standard deviation: 146.05 kW.
+- Ensemble fold MAEs: approximately 297.33, 505.44, 316.92, 86.29, and 149.47 kW.
+- Month/hour baseline mean fold MAE: 354.94 kW.
+- Mean fold MAE reduction versus baseline: approximately 23.62%.
+- Supplementary July-August 2024 seasonal holdout: ensemble MAE 485.91 kW; baseline
+  MAE 758.95 kW. Only one earlier summer is available, so this is supporting evidence,
+  not a guarantee for the 2025 test period.
+
+Fold performance varies substantially. Fold-level metrics and error plots should be
+shown alongside the average; a single aggregate number does not tell the full story.
+The final model's in-sample R² is not a generalization metric and should not be used as
+proof of future accuracy.
+
+6. OUTPUTS
+----------
+- predictions.csv: exactly timestamp,predicted_ac_power_kw and 1,488 test predictions.
+- experiment_report.json: model metrics, data audit, seasonal holdout, prediction summary,
+  and known limitations.
+- cv_fold_metrics.csv: validation dates, row counts, fold MAE and R², baseline MAE.
+- oof_diagnostics.csv: held-out historical actuals, predictions, and absolute errors.
+- worst_fold_diagnostics.csv: row-level errors for the most difficult validation fold.
+- worst_fold_monthly_summary.csv / worst_fold_hourly_summary.csv: summaries of that fold.
+- label_correction_sensitivity.json: comparison with and without the heuristic label fix.
+
+7. STREAMLIT VISUAL METRICS
+---------------------------
+Run `streamlit run app.py`. Click “Evaluate Model & Generate Forecast” to run the
+cross-validation and create forecasts. The dashboard sections are:
+- Model Comparison: CV MAE for HGB, Random Forest, ensemble, and baseline; fold-by-fold
+  comparison; table of validation fold date ranges and metrics.
+- Actual vs Predicted: daily average actual/predicted power, scatter plot, and a selected
+  fold's prediction trace. These are historical out-of-fold predictions only.
+- Error Analysis: absolute and signed error distributions, daily MAE, and worst-fold rows.
+- Generation Patterns: average actual/predicted output by hour and month, plus hourly MAE.
+- Test Forecast: test-period forecast line chart, daily averages, date/hour filters, and CSV
+  download. Because test labels are missing, this tab cannot report test MAE or R².
+- Metrics & Data: full model metrics, feature list, and downloadable diagnostics.
+
+Dashboard MAE is measured in kW; lower is better. Positive signed error means
+predicted power is greater than actual power (overprediction). Negative signed error
+means underprediction. R² is dimensionless and is best interpreted alongside MAE.
+
+8. REPRODUCIBILITY AND LIMITATIONS
+----------------------------------
+From the project root:
+    python solve.py
+    streamlit run app.py
+
+Install dependencies first with:
+    python -m pip install -r requirements.txt
+
+No actual power target is provided for July-August 2025, so the final test-period error
+cannot be measured yet. The most important next steps are to verify the suspected unit
+mismatch with the source owner, obtain more historical seasons, and validate predictions
+against a later labeled period before any operational accuracy claim.
